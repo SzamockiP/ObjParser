@@ -1,6 +1,9 @@
 ﻿#include <print>
 #include <string>
 #include <filesystem>
+#include <vector>
+#include <unordered_map>
+
 #include <CLI11.hpp>
 
 #define TINYOBJLOADER_DISABLE_FAST_FLOAT
@@ -34,9 +37,41 @@ int main(int argc, char** argv)
 	std::filesystem::path out_path(output_bin_path);
 	if (out_path.has_parent_path() && !std::filesystem::exists(out_path.parent_path()))
 	{
-		std::println("Output directory doesn't exist. Exiting...");
-		return 0;
+		std::println(stderr, "Output directory doesn't exist.");
+		return 1;
 	}
+
+	tinyobj::ObjReaderConfig obj_reader_config;
+	obj_reader_config.mtl_search_path = std::filesystem::path(input_obj_path).parent_path().string();
+
+	std::println("Loading model: {}", input_obj_path);
+	tinyobj::ObjReader obj_reader;
+	if (!obj_reader.ParseFromFile(input_obj_path, obj_reader_config))
+	{
+		if (!obj_reader.Error().empty())
+		{
+			std::println(stderr, "TinyObjReader error: {}.", obj_reader.Error());
+			return 1;
+		}
+	}
+
+	if (!obj_reader.Warning().empty())
+	{
+		std::println("TinyObjReader warning: {}", obj_reader.Warning());
+	}
+
+	auto& attrib = obj_reader.GetAttrib();
+	auto& shapes = obj_reader.GetShapes();
+	auto& materials = obj_reader.GetMaterials();
+
+	std::println("Model loaded");
+	std::println(" - Vertices: {}", attrib.vertices.size() / 3);
+	std::println(" - Shapes: {}", shapes.size());
+	std::println(" - Materials: {}", materials.size());
+
+
+
+	
 
 	return 0;
 }
