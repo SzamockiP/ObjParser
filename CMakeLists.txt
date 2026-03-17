@@ -11,20 +11,11 @@ endif()
 
 project ("ObjParser")
 
-
-include(FetchContent)
-FetchContent_Declare(
-  cli11
-  GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
-  GIT_TAG        v2.6.2
-)
-FetchContent_MakeAvailable(cli11)
-
 # Add source to this project's executable.
-add_executable (ObjParser "main.cpp" )
+add_executable (ObjParser "src/main.cpp"  )
 
-target_link_libraries(ObjParser PRIVATE
-	CLI11::CLI11
+target_include_directories(ObjParser PRIVATE
+	include
 )
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
