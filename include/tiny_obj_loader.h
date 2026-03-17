@@ -5355,7 +5355,7 @@ class StreamReader {
 // Define this macro to a larger value if your application needs to parse
 // very large streamed OBJ/MTL content.
 #ifndef TINYOBJLOADER_STREAM_READER_MAX_BYTES
-#define TINYOBJLOADER_STREAM_READER_MAX_BYTES (size_t(256) * size_t(1024) * size_t(1024))
+#define TINYOBJLOADER_STREAM_READER_MAX_BYTES (size_t(2048) * size_t(1024) * size_t(1024))
 #endif
 
   StreamReader(const char *buf, size_t length)
