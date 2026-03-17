@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <vector>
 #include <unordered_map>
+#include <iostream>
 
 #include <CLI11.hpp>
 
@@ -13,6 +14,30 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+struct Texture
+{
+	int width = 0;
+	int height = 0;
+	int channels = 0;
+	unsigned char* data = nullptr;
+
+	~Texture()
+	{
+		if (data != nullptr)
+		{
+			stbi_image_free(data);
+		}
+	}
+
+	Texture() = default;
+	Texture(const Texture&) = delete;
+	Texture& operator=(const Texture&) = delete;
+
+	Texture(Texture&& other) noexcept : width(other.width), height(other.height), channels(other.channels), data(other.data)
+	{
+		other.data = nullptr;
+	}
+};
 int main(int argc, char** argv)
 {
 	CLI::App app{ "ObjParser - .obj to morton code ordered voxel storage file" };
@@ -70,8 +95,64 @@ int main(int argc, char** argv)
 	std::println(" - Materials: {}", materials.size());
 
 
+	std::println("Loading textures");
+	std::unordered_map<std::string, Texture> texture_cache;
 
-	
+	std::filesystem::path base_dir = std::filesystem::path(input_obj_path).parent_path();
+	int not_loaded = 0;
+	int texture_count = 0;
+	for (const auto& material : materials)
+	{
+		if (material.diffuse_texname.empty() || texture_cache.contains(material.diffuse_texname))
+		{
+			continue;
+		}
+		++texture_count;
+
+		std::filesystem::path texture_path = base_dir / material.diffuse_texname;
+
+		Texture texture;
+		texture.data = stbi_load(texture_path.string().c_str(), &texture.width, &texture.height, &texture.channels, 4);
+		texture.channels = 4;
+
+		if (texture.data)
+		{
+			std::println("Loaded texture: {}", material.diffuse_texname);
+			texture_cache.emplace(material.diffuse_texname, std::move(texture));
+		}
+		else
+		{
+			std::println(stderr, "Couldn't load texture: {}", texture_path.string());
+			++not_loaded;
+		}
+	}
+
+	if (not_loaded > 0)
+	{
+		std::println(stderr, "Couldn't load {}/{} textures.", not_loaded, texture_count);
+		std::print("Do you wish to proceed? [y/N]: ");
+
+		std::string answer;
+		while (std::cin >> answer)
+		{
+			if (answer == "y" || answer == "Y")
+			{
+				std::println("Proceeding...");
+				break;
+			}
+			else if (answer == "n" || answer == "N")
+			{
+				std::println("Exiting...");
+				return 1;
+			}
+			else
+			{
+				std::print("Invalid input. Do you wish to proceed? [y/N]: ");
+			}
+		}
+	}
+
+	std::println("Loaded {} textures.", texture_cache.size());
 
 	return 0;
 }
