@@ -16,6 +16,141 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+constexpr float SAT_EPSILON = 1e-5f;
+
+struct Vec2
+{
+	float x, y;
+};
+
+struct Vec3
+{
+	float x, y, z;
+
+	Vec3 operator-(const Vec3& other) const
+	{
+		return { x - other.x, y - other.y, z - other.z };
+	}
+
+	Vec3 cross(const Vec3& other) const
+	{
+		return {
+			y * other.z - z * other.y,
+			z * other.x - x * other.z,
+			x * other.y - y * other.x
+		};
+	}
+
+	float length() const
+	{
+		return std::sqrt(x * x + y * y + z * z);
+	}
+
+	float dot(const Vec3& other) const { return x * other.x + y * other.y + z * other.z; }
+};
+
+inline bool axis_test(float p0, float p1, float p2, float box_radius)
+{
+	float proj_min = std::min({ p0, p1, p2 });
+	float proj_max = std::max({ p0, p1, p2 });
+
+	return !((proj_max < -box_radius - SAT_EPSILON) || (proj_min > box_radius + SAT_EPSILON));
+}
+
+bool check_voxel_triangle_intersect(const Vec3& box_center, const Vec3& box_half_size, const Vec3& tri_v0, const Vec3& tri_v1, const Vec3& tri_v2)
+{
+	Vec3 v0 = tri_v0 - box_center;
+	Vec3 v1 = tri_v1 - box_center;
+	Vec3 v2 = tri_v2 - box_center;
+
+	Vec3 e0 = v1 - v0;
+	Vec3 e1 = v2 - v1;
+	Vec3 e2 = v0 - v2;
+
+	if (std::min({ v0.x, v1.x, v2.x }) > box_half_size.x + SAT_EPSILON || std::max({ v0.x, v1.x, v2.x }) < -box_half_size.x - SAT_EPSILON) return false;
+	if (std::min({ v0.y, v1.y, v2.y }) > box_half_size.y + SAT_EPSILON || std::max({ v0.y, v1.y, v2.y }) < -box_half_size.y - SAT_EPSILON) return false;
+	if (std::min({ v0.z, v1.z, v2.z }) > box_half_size.z + SAT_EPSILON || std::max({ v0.z, v1.z, v2.z }) < -box_half_size.z - SAT_EPSILON) return false;
+
+	float rad, p0, p1, p2;
+
+	p0 = v0.z * e0.y - v0.y * e0.z;
+	p2 = v2.z * e0.y - v2.y * e0.z;
+	rad = box_half_size.y * std::abs(e0.z) + box_half_size.z * std::abs(e0.y);
+	if (!axis_test(p0, p0, p2, rad)) return false;
+
+	p0 = v0.z * e1.y - v0.y * e1.z;
+	p1 = v1.z * e1.y - v1.y * e1.z;
+	rad = box_half_size.y * std::abs(e1.z) + box_half_size.z * std::abs(e1.y);
+	if (!axis_test(p0, p1, p1, rad)) return false;
+
+	p0 = v0.z * e2.y - v0.y * e2.z;
+	p1 = v1.z * e2.y - v1.y * e2.z;
+	rad = box_half_size.y * std::abs(e2.z) + box_half_size.z * std::abs(e2.y);
+	if (!axis_test(p0, p1, p0, rad)) return false;
+
+	p0 = v0.x * e0.z - v0.z * e0.x;
+	p2 = v2.x * e0.z - v2.z * e0.x;
+	rad = box_half_size.x * std::abs(e0.z) + box_half_size.z * std::abs(e0.x);
+	if (!axis_test(p0, p0, p2, rad)) return false;
+
+	p0 = v0.x * e1.z - v0.z * e1.x;
+	p1 = v1.x * e1.z - v1.z * e1.x;
+	rad = box_half_size.x * std::abs(e1.z) + box_half_size.z * std::abs(e1.x);
+	if (!axis_test(p0, p1, p1, rad)) return false;
+
+	p0 = v0.x * e2.z - v0.z * e2.x;
+	p1 = v1.x * e2.z - v1.z * e2.x;
+	rad = box_half_size.x * std::abs(e2.z) + box_half_size.z * std::abs(e2.x);
+	if (!axis_test(p0, p1, p0, rad)) return false;
+
+	p0 = v0.y * e0.x - v0.x * e0.y;
+	p2 = v2.y * e0.x - v2.x * e0.y;
+	rad = box_half_size.x * std::abs(e0.y) + box_half_size.y * std::abs(e0.x);
+	if (!axis_test(p0, p0, p2, rad)) return false;
+
+	p0 = v0.y * e1.x - v0.x * e1.y;
+	p1 = v1.y * e1.x - v1.x * e1.y;
+	rad = box_half_size.x * std::abs(e1.y) + box_half_size.y * std::abs(e1.x);
+	if (!axis_test(p0, p1, p1, rad)) return false;
+
+	p0 = v0.y * e2.x - v0.x * e2.y;
+	p1 = v1.y * e2.x - v1.x * e2.y;
+	rad = box_half_size.x * std::abs(e2.y) + box_half_size.y * std::abs(e2.x);
+	if (!axis_test(p0, p1, p0, rad)) return false;
+
+	Vec3 normal = e0.cross(e1);
+	float plane_dist = normal.x * v0.x + normal.y * v0.y + normal.z * v0.z;
+
+	rad = box_half_size.x * std::abs(normal.x) + box_half_size.y * std::abs(normal.y) + box_half_size.z * std::abs(normal.z);
+
+	if (std::abs(plane_dist) > rad + SAT_EPSILON) return false;
+
+	return true;
+}
+
+inline void get_barycentric(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& p, float& u, float& v, float& w)
+{
+	Vec3 v0 = b - a, v1 = c - a, v2 = p - a;
+
+	float d00 = v0.dot(v0);
+	float d01 = v0.dot(v1);
+	float d11 = v1.dot(v1);
+	float d20 = v2.dot(v0);
+	float d21 = v2.dot(v1);
+
+	float denom = d00 * d11 - d01 * d01;
+
+	if (std::abs(denom) < 1e-8f)
+	{
+		u = 1.0f; v = 0.0f; w = 0.0f;
+		return;
+	}
+
+	v = (d11 * d20 - d01 * d21) / denom;
+	w = (d00 * d21 - d01 * d20) / denom;
+	u = 1.0f - v - w;
+}
+
 struct Texture
 {
 	int width = 0;
@@ -41,29 +176,7 @@ struct Texture
 	}
 };
 
-struct Vec3
-{
-	float x, y, z;
 
-	Vec3 operator-(const Vec3& other) const
-	{
-		return { x - other.x, y - other.y, z - other.z };
-	}
-
-	Vec3 cross(const Vec3& other) const
-	{
-		return {
-			y * other.z - z * other.y,
-			z * other.x - x * other.z,
-			x * other.y - y * other.x
-		};
-	}
-
-	float length() const
-	{
-		return std::sqrt(x * x + y * y + z * z);
-	}
-};
 
 struct AABB
 {
@@ -178,7 +291,7 @@ int main(int argc, char** argv)
 
 	if (not_loaded > 0)
 	{
-		std::println(stderr, "Couldn't load {}/{} textures.", not_loaded, texture_count);
+		std::println(stderr, "Couldn't load {} / {} textures.", not_loaded, texture_count);
 		std::print("Do you wish to proceed? [y/N]: ");
 
 		std::string answer;
@@ -203,7 +316,7 @@ int main(int argc, char** argv)
 
 	std::println("Loaded {} textures.", texture_cache.size());
 	
-	std::println("Calculating model bounding box.");
+	std::println("\nCalculating model bounding box.");
 	AABB model_aabb;
 
 	for (std::size_t i = 0; i < attrib.vertices.size(); i += 3)
@@ -216,8 +329,8 @@ int main(int argc, char** argv)
 
 		model_aabb.expand(v);
 	}
-	std::println("Model aabb min: ({:.3f}, {:.3f}, {:.3f})", model_aabb.min.x, model_aabb.min.y, model_aabb.min.z);
-	std::println("Model aabb max: ({:.3f}, {:.3f}, {:.3f})", model_aabb.max.x, model_aabb.max.y, model_aabb.max.z);
+	std::println(" - aabb min: ({:.3f}, {:.3f}, {:.3f})", model_aabb.min.x, model_aabb.min.y, model_aabb.min.z);
+	std::println(" - aabb max: ({:.3f}, {:.3f}, {:.3f})", model_aabb.max.x, model_aabb.max.y, model_aabb.max.z);
 
 	Vec3 size = {
 		model_aabb.max.x - model_aabb.min.x,
@@ -228,8 +341,8 @@ int main(int argc, char** argv)
 	float max_dimension = std::max({ size.x, size.y, size.z });
 	float voxel_size = max_dimension / static_cast<float>(resolution);
 
-	std::println("Max model size: {:.3f}", max_dimension);
-	std::println("Voxel size: {:.3f}", voxel_size);
+	std::println(" - Max model size: {:.3f}", max_dimension);
+	std::println(" - Voxel size: {:.3f}", voxel_size);
 
 	std::println("\nEstimating size");
 	double total_area = 0.0;
@@ -276,29 +389,163 @@ int main(int argc, char** argv)
 	std::println(" - Temp files: {:.3f} GB", temp_disk_gb);
 	std::println(" - Final file: {:.3f} GB", final_disk_gb);
 
-	if (not_loaded > 0)
-	{
-		std::print("Do you wish to proceed? [y/N]: ");
 
-		std::string answer;
-		while (std::cin >> answer)
+	std::println("\nDo you wish to proceed? [y/N]: ");
+
+	std::string answer;
+	while (std::cin >> answer)
+	{
+		if (answer == "y" || answer == "Y")
 		{
-			if (answer == "y" || answer == "Y")
-			{
-				std::println("Proceeding...");
-				break;
-			}
-			else if (answer == "n" || answer == "N")
-			{
-				std::println("Exiting...");
-				return 1;
-			}
-			else
-			{
-				std::print("Invalid input. Do you wish to proceed? [y/N]: ");
-			}
+			std::println("Proceeding...");
+			break;
+		}
+		else if (answer == "n" || answer == "N")
+		{
+			std::println("Exiting...");
+			return 1;
+		}
+		else
+		{
+			std::print("Invalid input. Do you wish to proceed? [y/N]: ");
 		}
 	}
+	
+
+	std::println("Starting voxelization.");
+
+	float inv_voxel_size = 1.0f / voxel_size;
+	Vec3 box_half_size = { voxel_size * 0.5f, voxel_size * 0.5f, voxel_size * 0.5f };
+
+	auto world_to_voxel = [&](float pos, float global_min) -> int
+		{
+			int idx = static_cast<int>(std::floor((pos - global_min) * inv_voxel_size));
+			return std::clamp(idx, 0, static_cast<int>(resolution) - 1);
+		};
+
+	std::size_t processed_triangles = 0;
+	std::size_t generated_voxels = 0;
+	std::size_t total_shapes = shapes.size();
+
+	for (size_t s = 0; s < total_shapes; s++)
+	{
+		const auto& shape = shapes[s];
+
+		std::print("\rProcessing shape: {} / {} ({:.2f}%)...",
+			s + 1,
+			total_shapes,
+			(static_cast<double>(s) * 100) / total_shapes);
+
+		std::size_t index_offset = 0;
+		for (const auto face_vert_num : shape.mesh.num_face_vertices)
+		{
+			if (face_vert_num != 3)
+			{
+				index_offset += face_vert_num;
+				continue;
+			}
+
+			auto idx0 = shape.mesh.indices[index_offset];
+			auto idx1 = shape.mesh.indices[index_offset + 1];
+			auto idx2 = shape.mesh.indices[index_offset + 2];
+
+			Vec3 v0 = { attrib.vertices[3 * idx0.vertex_index], attrib.vertices[3 * idx0.vertex_index + 1], attrib.vertices[3 * idx0.vertex_index + 2] };
+			Vec3 v1 = { attrib.vertices[3 * idx1.vertex_index], attrib.vertices[3 * idx1.vertex_index + 1], attrib.vertices[3 * idx1.vertex_index + 2] };
+			Vec3 v2 = { attrib.vertices[3 * idx2.vertex_index], attrib.vertices[3 * idx2.vertex_index + 1], attrib.vertices[3 * idx2.vertex_index + 2] };
+
+			Vec2 uv0 = { 0.0f, 0.0f }, uv1 = { 0.0f, 0.0f }, uv2 = { 0.0f, 0.0f };
+			if (!attrib.texcoords.empty() && 
+				idx0.texcoord_index >= 0 &&
+				idx1.texcoord_index >= 0 &&
+				idx2.texcoord_index >= 0)
+			{
+				uv0 = { attrib.texcoords[2 * idx0.texcoord_index], attrib.texcoords[2 * idx0.texcoord_index + 1] };
+				uv1 = { attrib.texcoords[2 * idx1.texcoord_index], attrib.texcoords[2 * idx1.texcoord_index + 1] };
+				uv2 = { attrib.texcoords[2 * idx2.texcoord_index], attrib.texcoords[2 * idx2.texcoord_index + 1] };
+			}
+
+			int material_id = -1;
+			if (face_vert_num < shape.mesh.material_ids.size())
+			{
+				material_id = shape.mesh.material_ids[face_vert_num];
+			}
+			
+			AABB tri_aabb;
+			tri_aabb.expand(v0);
+			tri_aabb.expand(v1);
+			tri_aabb.expand(v2);
+
+			int min_voxel_x = world_to_voxel(tri_aabb.min.x, model_aabb.min.x);
+			int max_voxel_x = world_to_voxel(tri_aabb.max.x, model_aabb.min.x);
+			int min_voxel_y = world_to_voxel(tri_aabb.min.y, model_aabb.min.y);
+			int max_voxel_y = world_to_voxel(tri_aabb.max.y, model_aabb.min.y);
+			int min_voxel_z = world_to_voxel(tri_aabb.min.z, model_aabb.min.z);
+			int max_voxel_z = world_to_voxel(tri_aabb.max.z, model_aabb.min.z);
+
+			// for every voxel in aabb of triangle
+			for (int z = min_voxel_z; z <= max_voxel_z; ++z)
+			{
+				for (int y = min_voxel_y; y <= max_voxel_y; ++y)
+				{
+					for (int x = min_voxel_x; x <= max_voxel_x; ++x)
+					{
+						Vec3 box_center = {
+							model_aabb.min.x + (x + 0.5f) * voxel_size,
+							model_aabb.min.y + (y + 0.5f) * voxel_size,
+							model_aabb.min.z + (z + 0.5f) * voxel_size
+						};
+
+						if (check_voxel_triangle_intersect(box_center, box_half_size, v0, v1, v2))
+						{
+							generated_voxels++;
+
+							float u, v, w;
+							get_barycentric(v0, v1, v2, box_center, u, v, w);
+
+							u = std::clamp(u, 0.0f, 1.0f);
+							v = std::clamp(v, 0.0f, 1.0f);
+							w = std::clamp(w, 0.0f, 1.0f);
+							float sum = u + v + w;
+							u /= sum; v /= sum; w /= sum;
+
+							float final_u = u * uv0.x + v * uv1.x + w * uv2.x;
+							float final_v = u * uv0.y + v * uv1.y + w * uv2.y;
+
+							// default color white
+							std::uint8_t color_r = 255, color_g = 255, color_b = 255, color_a = 255;
+
+							if (material_id >= 0 && material_id < materials.size())
+							{
+								std::string tex_name = materials[material_id].diffuse_texname;
+
+								if (!tex_name.empty() && texture_cache.contains(tex_name))
+								{
+									auto& tex = texture_cache[tex_name];
+
+									int tex_x = std::clamp(static_cast<int>(final_u * tex.width), 0, tex.width - 1);
+									int tex_y = std::clamp(static_cast<int>((1.0f - final_v) * tex.height), 0, tex.height - 1);
+
+									int pixel_index = (tex_y * tex.width + tex_x) * 4;
+									color_r = tex.data[pixel_index + 0];
+									color_g = tex.data[pixel_index + 1];
+									color_b = tex.data[pixel_index + 2];
+									color_a = tex.data[pixel_index + 3];
+								}
+							}
+
+							// TODO: calculate morton code and save it
+						}
+					}
+				}
+			}
+
+			index_offset += 3;
+			processed_triangles++;
+		}
+	}
+	std::println("\rFinished                                 ");
+	std::println(" - Processed: {} triangles", processed_triangles);
+	std::println(" - Generated: {} voxels", generated_voxels);
 
 	return 0;
 }
