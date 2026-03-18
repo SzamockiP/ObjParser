@@ -6,6 +6,7 @@
 #include <iostream>
 #include <limits>
 #include <algorithm>
+#include <queue>
 
 #include <CLI11.hpp>
 
@@ -200,12 +201,158 @@ struct AABB
 	}
 };
 
+struct VoxelData
+{
+	std::uint64_t morton;
+	std::uint8_t r, g, b, a;
+
+	bool operator<(const VoxelData& other) const
+	{
+		return morton < other.morton;
+	}
+};
+
+struct MergeItem
+{
+	VoxelData voxel;
+	int stream_index;
+
+	bool operator>(const MergeItem& other) const
+	{
+		return voxel.morton > other.voxel.morton;
+	}
+};
+
+inline std::uint64_t split_by_3(std::uint64_t a)
+{
+	a &= 0x1ffffff;
+	a = (a | a << 32) & 0x1f00000000ffff;
+	a = (a | a << 16) & 0x1f0000ff0000ff;
+	a = (a | a << 8) & 0x100f00f00f00f00f;
+	a = (a | a << 4) & 0x10c30c30c30c30c3;
+	a = (a | a << 2) & 0x1249249249249249;
+	return a;
+}
+
+inline std::uint64_t encode_morton(std::uint32_t x, std::uint32_t y, std::uint32_t z)
+{
+	return split_by_3(x) | (split_by_3(y) << 1) | (split_by_3(z) << 2);
+}
+
+void flush_voxel_buffer(std::vector<VoxelData>& buffer, int& chunk_id, const std::filesystem::path& temp_dir)
+{
+	if (buffer.empty()) return;
+
+	std::sort(buffer.begin(), buffer.end());
+
+	std::string filename = std::format("temp_chunk_{}.bin", chunk_id++);
+	std::filesystem::path full_chunk_path = temp_dir / filename;
+
+	std::ofstream out_file(full_chunk_path, std::ios::binary);
+
+	if (!out_file.is_open())
+	{
+		throw std::runtime_error(std::format("Failed to open temp file for writing: {}", full_chunk_path.string()));
+	}
+
+	out_file.write(reinterpret_cast<const char*>(buffer.data()), buffer.size() * sizeof(VoxelData));
+	out_file.close();
+	buffer.clear();
+}
+
+void merge_and_deduplicate_chunks(int chunk_count, const std::filesystem::path& temp_dir, const std::filesystem::path& out_path)
+{
+	std::println("\nMerging {} temp files", chunk_count);
+
+	std::vector<std::ifstream> streams;
+	std::priority_queue<MergeItem, std::vector<MergeItem>, std::greater<MergeItem>> pq;
+
+	for (int i = 0; i < chunk_count; ++i)
+	{
+		std::filesystem::path chunk_path = temp_dir / std::format("temp_chunk_{}.bin", i);
+		streams.emplace_back(chunk_path, std::ios::binary);
+
+		if (!streams.back().is_open())
+		{
+			throw std::runtime_error(std::format("Couldn't open file to merge: {}", chunk_path.string()));
+		}
+
+		VoxelData first_voxel;
+		if (streams.back().read(reinterpret_cast<char*>(&first_voxel), sizeof(VoxelData)))
+		{
+			pq.push({ first_voxel, i });
+		}
+	}
+
+	std::ofstream out_file(out_path, std::ios::binary);
+	if (!out_file.is_open())
+	{
+		throw std::runtime_error(std::format("Couldn't make output file: {}", out_path.string()));
+	}
+
+	const size_t MERGE_BUFFER_SIZE = 10'000'000;
+	std::vector<VoxelData> out_buffer;
+	out_buffer.reserve(MERGE_BUFFER_SIZE);
+
+	uint64_t last_morton = ~0ULL;
+	size_t final_voxels = 0;
+
+	while (!pq.empty())
+	{
+		MergeItem current = pq.top();
+		pq.pop();
+
+		if (current.voxel.morton != last_morton)
+		{
+			out_buffer.push_back(current.voxel);
+			last_morton = current.voxel.morton;
+			final_voxels++;
+
+			if (out_buffer.size() >= MERGE_BUFFER_SIZE)
+			{
+				out_file.write(reinterpret_cast<const char*>(out_buffer.data()), out_buffer.size() * sizeof(VoxelData));
+				out_buffer.clear();
+			}
+		}
+
+		VoxelData next_voxel;
+		if (streams[current.stream_index].read(reinterpret_cast<char*>(&next_voxel), sizeof(VoxelData)))
+		{
+			pq.push({ next_voxel, current.stream_index });
+		}
+	}
+
+	if (!out_buffer.empty())
+	{
+		out_file.write(reinterpret_cast<const char*>(out_buffer.data()), out_buffer.size() * sizeof(VoxelData));
+	}
+
+	for (auto& s : streams)
+	{
+		s.close();
+	}
+
+	for (int i = 0; i < chunk_count; ++i)
+	{
+		std::filesystem::remove(temp_dir / std::format("temp_chunk_{}.bin", i));
+	}
+
+	if (std::filesystem::is_empty(temp_dir))
+	{
+		std::filesystem::remove(temp_dir);
+	}
+
+	std::println("Files merged\n - Size: {:.2f} MB\n - Saved: {} voxels",
+		static_cast<double>(final_voxels * sizeof(VoxelData)) / (1024.0 * 1024.0), final_voxels);
+}
+
 int main(int argc, char** argv)
 {
 	CLI::App app{ "ObjParser - .obj to morton code ordered voxel storage file" };
 
 	std::string input_obj_path;
-	std::string output_bin_path;
+	std::string output_bin_path = "output.bin";
+	std::string custom_temp_dir = "";
 
 	std::uint32_t resolution = 1024;
 
@@ -214,12 +361,18 @@ int main(int argc, char** argv)
 		->check(CLI::ExistingFile);
 
 	app.add_option("-o,--output", output_bin_path, ".bin output filepath")
-		->required();	
+		->required();
+
+	app.add_option("-t,--temp", custom_temp_dir, "/temp folder directory path");
 
 	app.add_option("-r,--resolution", resolution, "Voxel grid resolution (default: 1024)");
 
 	CLI11_PARSE(app, argc, argv);
 
+	if (!output_bin_path.ends_with(".bin"))
+	{
+		output_bin_path += ".bin";
+	}
 
 	std::filesystem::path out_path(output_bin_path);
 	if (out_path.has_parent_path() && !std::filesystem::exists(out_path.parent_path()))
@@ -228,10 +381,34 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
+	std::filesystem::path temp_dir;
+
+	if (!custom_temp_dir.empty())
+	{
+		temp_dir = custom_temp_dir;
+
+		if (!std::filesystem::is_directory(temp_dir))
+		{
+			std::println(stderr, "Error: Provided temp path does not exist or is not a directory.");
+			return 1;
+		}
+	}
+	else
+	{
+		temp_dir = out_path.has_parent_path() ? out_path.parent_path() / "temp" : std::filesystem::path("temp");
+
+		if (!std::filesystem::exists(temp_dir))
+		{
+			std::filesystem::create_directories(temp_dir);
+		}
+	}
+
+	std::println("Temp directory set to: {}", temp_dir.string());
+
 	tinyobj::ObjReaderConfig obj_reader_config;
 	obj_reader_config.mtl_search_path = std::filesystem::path(input_obj_path).parent_path().string();
 
-	std::println("Loading model: {}", input_obj_path);
+	std::println("\nLoading model: {}", input_obj_path);
 	tinyobj::ObjReader obj_reader;
 	if (!obj_reader.ParseFromFile(input_obj_path, obj_reader_config))
 	{
@@ -257,7 +434,7 @@ int main(int argc, char** argv)
 	std::println(" - Materials: {}", materials.size());
 
 
-	std::println("Loading textures...");
+	std::println("\nLoading textures...");
 	std::unordered_map<std::string, Texture> texture_cache;
 
 	std::filesystem::path base_dir = std::filesystem::path(input_obj_path).parent_path();
@@ -315,7 +492,7 @@ int main(int argc, char** argv)
 	}
 
 	std::println("Loaded {} textures.", texture_cache.size());
-	
+
 	std::println("\nCalculating model bounding box.");
 	AABB model_aabb;
 
@@ -352,7 +529,7 @@ int main(int argc, char** argv)
 	for (const auto& shape : shapes)
 	{
 		std::size_t index_offset = 0;
-		for(const auto face_vert_num : shape.mesh.num_face_vertices)
+		for (const auto face_vert_num : shape.mesh.num_face_vertices)
 		{
 			if (face_vert_num != 3)
 			{
@@ -382,12 +559,10 @@ int main(int argc, char** argv)
 		}
 	}
 
-	double temp_disk_gb = (estimated_voxels * 16) / (1024.0 * 1024.0 * 1024.0);
-	double final_disk_gb = (estimated_voxels * 12) / (1024.0 * 1024.0 * 1024.0);
+	double temp_disk_gb = (estimated_voxels * 16) / (1024.0 * 1024.0);
 
 	std::println(" - Voxels: {}", estimated_voxels);
-	std::println(" - Temp files: {:.3f} GB", temp_disk_gb);
-	std::println(" - Final file: {:.3f} GB", final_disk_gb);
+	std::println(" - Temp files: {:.3f} MB", temp_disk_gb);
 
 
 	std::println("\nDo you wish to proceed? [y/N]: ");
@@ -410,7 +585,7 @@ int main(int argc, char** argv)
 			std::print("Invalid input. Do you wish to proceed? [y/N]: ");
 		}
 	}
-	
+
 
 	std::println("Starting voxelization.");
 
@@ -427,125 +602,168 @@ int main(int argc, char** argv)
 	std::size_t generated_voxels = 0;
 	std::size_t total_shapes = shapes.size();
 
-	for (size_t s = 0; s < total_shapes; s++)
+	const size_t MAX_BUFFER_SIZE = 10'000'000;
+	std::vector<VoxelData> voxel_buffer;
+	voxel_buffer.reserve(MAX_BUFFER_SIZE);
+	int chunk_counter = 0;
+	try
 	{
-		const auto& shape = shapes[s];
-
-		std::print("\rProcessing shape: {} / {} ({:.2f}%)...",
-			s + 1,
-			total_shapes,
-			(static_cast<double>(s) * 100) / total_shapes);
-
-		std::size_t index_offset = 0;
-		for (const auto face_vert_num : shape.mesh.num_face_vertices)
+		for (size_t s = 0; s < total_shapes; s++)
 		{
-			if (face_vert_num != 3)
+			const auto& shape = shapes[s];
+
+			std::print("\rProcessing shape: {} / {} ({:.2f}%)...",
+				s + 1,
+				total_shapes,
+				(static_cast<double>(s) * 100) / total_shapes);
+
+			std::size_t index_offset = 0;
+			for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); f++)
 			{
-				index_offset += face_vert_num;
-				continue;
-			}
+				const auto face_vert_num = shape.mesh.num_face_vertices[f];
 
-			auto idx0 = shape.mesh.indices[index_offset];
-			auto idx1 = shape.mesh.indices[index_offset + 1];
-			auto idx2 = shape.mesh.indices[index_offset + 2];
-
-			Vec3 v0 = { attrib.vertices[3 * idx0.vertex_index], attrib.vertices[3 * idx0.vertex_index + 1], attrib.vertices[3 * idx0.vertex_index + 2] };
-			Vec3 v1 = { attrib.vertices[3 * idx1.vertex_index], attrib.vertices[3 * idx1.vertex_index + 1], attrib.vertices[3 * idx1.vertex_index + 2] };
-			Vec3 v2 = { attrib.vertices[3 * idx2.vertex_index], attrib.vertices[3 * idx2.vertex_index + 1], attrib.vertices[3 * idx2.vertex_index + 2] };
-
-			Vec2 uv0 = { 0.0f, 0.0f }, uv1 = { 0.0f, 0.0f }, uv2 = { 0.0f, 0.0f };
-			if (!attrib.texcoords.empty() && 
-				idx0.texcoord_index >= 0 &&
-				idx1.texcoord_index >= 0 &&
-				idx2.texcoord_index >= 0)
-			{
-				uv0 = { attrib.texcoords[2 * idx0.texcoord_index], attrib.texcoords[2 * idx0.texcoord_index + 1] };
-				uv1 = { attrib.texcoords[2 * idx1.texcoord_index], attrib.texcoords[2 * idx1.texcoord_index + 1] };
-				uv2 = { attrib.texcoords[2 * idx2.texcoord_index], attrib.texcoords[2 * idx2.texcoord_index + 1] };
-			}
-
-			int material_id = -1;
-			if (face_vert_num < shape.mesh.material_ids.size())
-			{
-				material_id = shape.mesh.material_ids[face_vert_num];
-			}
-			
-			AABB tri_aabb;
-			tri_aabb.expand(v0);
-			tri_aabb.expand(v1);
-			tri_aabb.expand(v2);
-
-			int min_voxel_x = world_to_voxel(tri_aabb.min.x, model_aabb.min.x);
-			int max_voxel_x = world_to_voxel(tri_aabb.max.x, model_aabb.min.x);
-			int min_voxel_y = world_to_voxel(tri_aabb.min.y, model_aabb.min.y);
-			int max_voxel_y = world_to_voxel(tri_aabb.max.y, model_aabb.min.y);
-			int min_voxel_z = world_to_voxel(tri_aabb.min.z, model_aabb.min.z);
-			int max_voxel_z = world_to_voxel(tri_aabb.max.z, model_aabb.min.z);
-
-			// for every voxel in aabb of triangle
-			for (int z = min_voxel_z; z <= max_voxel_z; ++z)
-			{
-				for (int y = min_voxel_y; y <= max_voxel_y; ++y)
+				if (face_vert_num != 3)
 				{
-					for (int x = min_voxel_x; x <= max_voxel_x; ++x)
+					index_offset += face_vert_num;
+					continue;
+				}
+
+				auto idx0 = shape.mesh.indices[index_offset];
+				auto idx1 = shape.mesh.indices[index_offset + 1];
+				auto idx2 = shape.mesh.indices[index_offset + 2];
+
+				Vec3 v0 = { attrib.vertices[3 * idx0.vertex_index], attrib.vertices[3 * idx0.vertex_index + 1], attrib.vertices[3 * idx0.vertex_index + 2] };
+				Vec3 v1 = { attrib.vertices[3 * idx1.vertex_index], attrib.vertices[3 * idx1.vertex_index + 1], attrib.vertices[3 * idx1.vertex_index + 2] };
+				Vec3 v2 = { attrib.vertices[3 * idx2.vertex_index], attrib.vertices[3 * idx2.vertex_index + 1], attrib.vertices[3 * idx2.vertex_index + 2] };
+
+				Vec2 uv0 = { 0.0f, 0.0f }, uv1 = { 0.0f, 0.0f }, uv2 = { 0.0f, 0.0f };
+				if (!attrib.texcoords.empty() &&
+					idx0.texcoord_index >= 0 &&
+					idx1.texcoord_index >= 0 &&
+					idx2.texcoord_index >= 0)
+				{
+					uv0 = { attrib.texcoords[2 * idx0.texcoord_index], attrib.texcoords[2 * idx0.texcoord_index + 1] };
+					uv1 = { attrib.texcoords[2 * idx1.texcoord_index], attrib.texcoords[2 * idx1.texcoord_index + 1] };
+					uv2 = { attrib.texcoords[2 * idx2.texcoord_index], attrib.texcoords[2 * idx2.texcoord_index + 1] };
+				}
+
+				int material_id = -1;
+				if (f < shape.mesh.material_ids.size())
+				{
+					material_id = shape.mesh.material_ids[f];
+				}
+
+				AABB tri_aabb;
+				tri_aabb.expand(v0);
+				tri_aabb.expand(v1);
+				tri_aabb.expand(v2);
+
+				int min_voxel_x = world_to_voxel(tri_aabb.min.x, model_aabb.min.x);
+				int max_voxel_x = world_to_voxel(tri_aabb.max.x, model_aabb.min.x);
+				int min_voxel_y = world_to_voxel(tri_aabb.min.y, model_aabb.min.y);
+				int max_voxel_y = world_to_voxel(tri_aabb.max.y, model_aabb.min.y);
+				int min_voxel_z = world_to_voxel(tri_aabb.min.z, model_aabb.min.z);
+				int max_voxel_z = world_to_voxel(tri_aabb.max.z, model_aabb.min.z);
+
+
+				// for every voxel in aabb of triangle
+				for (int z = min_voxel_z; z <= max_voxel_z; ++z)
+				{
+					for (int y = min_voxel_y; y <= max_voxel_y; ++y)
 					{
-						Vec3 box_center = {
-							model_aabb.min.x + (x + 0.5f) * voxel_size,
-							model_aabb.min.y + (y + 0.5f) * voxel_size,
-							model_aabb.min.z + (z + 0.5f) * voxel_size
-						};
-
-						if (check_voxel_triangle_intersect(box_center, box_half_size, v0, v1, v2))
+						for (int x = min_voxel_x; x <= max_voxel_x; ++x)
 						{
-							generated_voxels++;
+							Vec3 box_center = {
+								model_aabb.min.x + (x + 0.5f) * voxel_size,
+								model_aabb.min.y + (y + 0.5f) * voxel_size,
+								model_aabb.min.z + (z + 0.5f) * voxel_size
+							};
 
-							float u, v, w;
-							get_barycentric(v0, v1, v2, box_center, u, v, w);
-
-							u = std::clamp(u, 0.0f, 1.0f);
-							v = std::clamp(v, 0.0f, 1.0f);
-							w = std::clamp(w, 0.0f, 1.0f);
-							float sum = u + v + w;
-							u /= sum; v /= sum; w /= sum;
-
-							float final_u = u * uv0.x + v * uv1.x + w * uv2.x;
-							float final_v = u * uv0.y + v * uv1.y + w * uv2.y;
-
-							// default color white
-							std::uint8_t color_r = 255, color_g = 255, color_b = 255, color_a = 255;
-
-							if (material_id >= 0 && material_id < materials.size())
+							if (check_voxel_triangle_intersect(box_center, box_half_size, v0, v1, v2))
 							{
-								std::string tex_name = materials[material_id].diffuse_texname;
+								generated_voxels++;
 
-								if (!tex_name.empty() && texture_cache.contains(tex_name))
+								float u, v, w;
+								get_barycentric(v0, v1, v2, box_center, u, v, w);
+
+								u = std::clamp(u, 0.0f, 1.0f);
+								v = std::clamp(v, 0.0f, 1.0f);
+								w = std::clamp(w, 0.0f, 1.0f);
+								float sum = u + v + w;
+								u /= sum; v /= sum; w /= sum;
+
+								float final_u = u * uv0.x + v * uv1.x + w * uv2.x;
+								float final_v = u * uv0.y + v * uv1.y + w * uv2.y;
+
+								// default color white
+								std::uint8_t color_r = 255, color_g = 255, color_b = 255, color_a = 255;
+
+								if (material_id >= 0 && material_id < materials.size())
 								{
-									auto& tex = texture_cache[tex_name];
+									std::string tex_name = materials[material_id].diffuse_texname;
 
-									int tex_x = std::clamp(static_cast<int>(final_u * tex.width), 0, tex.width - 1);
-									int tex_y = std::clamp(static_cast<int>((1.0f - final_v) * tex.height), 0, tex.height - 1);
+									if (!tex_name.empty() && texture_cache.contains(tex_name))
+									{
+										auto& tex = texture_cache[tex_name];
 
-									int pixel_index = (tex_y * tex.width + tex_x) * 4;
-									color_r = tex.data[pixel_index + 0];
-									color_g = tex.data[pixel_index + 1];
-									color_b = tex.data[pixel_index + 2];
-									color_a = tex.data[pixel_index + 3];
+										int tex_x = std::clamp(static_cast<int>(final_u * tex.width), 0, tex.width - 1);
+										int tex_y = std::clamp(static_cast<int>((1.0f - final_v) * tex.height), 0, tex.height - 1);
+
+										int pixel_index = (tex_y * tex.width + tex_x) * 4;
+										color_r = tex.data[pixel_index + 0];
+										color_g = tex.data[pixel_index + 1];
+										color_b = tex.data[pixel_index + 2];
+										color_a = tex.data[pixel_index + 3];
+									}
+								}
+
+								uint64_t morton_code = encode_morton(x, y, z);
+
+								voxel_buffer.push_back({
+									morton_code,
+									color_r, color_g, color_b, color_a
+									});
+
+								if (voxel_buffer.size() >= MAX_BUFFER_SIZE)
+								{
+									std::print("\rSaving temp file: {} ...                              ", chunk_counter);
+									flush_voxel_buffer(voxel_buffer, chunk_counter, temp_dir);
+									std::print("\rSaved temp file: {}                                   ", chunk_counter-1);
+									std::print("\nProcessing shape: {} / {} ({:.2f}%)...", s + 1, total_shapes, (static_cast<double>(s) * 100.0) / total_shapes);
 								}
 							}
-
-							// TODO: calculate morton code and save it
 						}
 					}
 				}
+				index_offset += 3;
+				processed_triangles++;
 			}
+		}
+		if (!voxel_buffer.empty())
+		{
+			std::print("\rSaving temp file: {} ...                              ", chunk_counter);
+			flush_voxel_buffer(voxel_buffer, chunk_counter, temp_dir);
+			std::println("\rSaved temp file: {}                                   ", chunk_counter - 1);
+		}
 
-			index_offset += 3;
-			processed_triangles++;
+		if (chunk_counter > 0)
+		{
+
+			std::println("\nFinishing");
+			std::println(" - Processed: {} triangles", processed_triangles);
+			std::println(" - Generated: {} voxels", generated_voxels);
+			merge_and_deduplicate_chunks(chunk_counter, temp_dir, out_path);
+		}
+		else
+		{
+			std::println("No voxels generated. Output file hasn't been created.");
 		}
 	}
-	std::println("\rFinished                                 ");
-	std::println(" - Processed: {} triangles", processed_triangles);
-	std::println(" - Generated: {} voxels", generated_voxels);
-
+	catch (const std::exception& e)
+	{
+		std::println(stderr, "\nFATAL ERROR: {}", e.what());
+		return 1;
+	}
+	
 	return 0;
 }
