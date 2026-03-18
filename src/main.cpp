@@ -200,7 +200,7 @@ struct AABB
 		max.z = std::max(max.z, point.z);
 	}
 };
-
+#pragma pack(push, 1)
 struct VoxelData
 {
 	std::uint64_t morton;
@@ -211,6 +211,7 @@ struct VoxelData
 		return morton < other.morton;
 	}
 };
+#pragma pack(pop)
 
 struct MergeItem
 {
