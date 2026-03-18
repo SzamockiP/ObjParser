@@ -44,6 +44,25 @@ struct Texture
 struct Vec3
 {
 	float x, y, z;
+
+	Vec3 operator-(const Vec3& other) const
+	{
+		return { x - other.x, y - other.y, z - other.z };
+	}
+
+	Vec3 cross(const Vec3& other) const
+	{
+		return {
+			y * other.z - z * other.y,
+			z * other.x - x * other.z,
+			x * other.y - y * other.x
+		};
+	}
+
+	float length() const
+	{
+		return std::sqrt(x * x + y * y + z * z);
+	}
 };
 
 struct AABB
@@ -211,6 +230,51 @@ int main(int argc, char** argv)
 
 	std::println("Max model size: {:.3f}", max_dimension);
 	std::println("Voxel size: {:.3f}", voxel_size);
+
+	std::println("\nEstimating size");
+	double total_area = 0.0;
+	std::uint64_t estimated_voxels = 0;
+	const float voxel_face_area = voxel_size * voxel_size;
+
+	for (const auto& shape : shapes)
+	{
+		std::size_t index_offset = 0;
+		for(const auto face_vert_num : shape.mesh.num_face_vertices)
+		{
+			if (face_vert_num != 3)
+			{
+				index_offset += face_vert_num;
+				continue;
+			}
+
+			auto idx0 = shape.mesh.indices[index_offset];
+			auto idx1 = shape.mesh.indices[index_offset + 1];
+			auto idx2 = shape.mesh.indices[index_offset + 2];
+
+			Vec3 v0 = { attrib.vertices[3 * idx0.vertex_index], attrib.vertices[3 * idx0.vertex_index + 1], attrib.vertices[3 * idx0.vertex_index + 2] };
+			Vec3 v1 = { attrib.vertices[3 * idx1.vertex_index], attrib.vertices[3 * idx1.vertex_index + 1], attrib.vertices[3 * idx1.vertex_index + 2] };
+			Vec3 v2 = { attrib.vertices[3 * idx2.vertex_index], attrib.vertices[3 * idx2.vertex_index + 1], attrib.vertices[3 * idx2.vertex_index + 2] };
+
+			Vec3 e1 = v1 - v0;
+			Vec3 e2 = v2 - v0;
+
+			float area = 0.5f * e1.cross(e2).length();
+			total_area += area;
+
+			// 1.5f is heuristic
+			float voxels_for_tri = (area / voxel_face_area) * 1.5f;
+			estimated_voxels += std::max(1ull, static_cast<std::uint64_t>(std::ceil(voxels_for_tri)));
+
+			index_offset += 3;
+		}
+	}
+
+	double temp_disk_gb = (estimated_voxels * 16) / (1024.0 * 1024.0 * 1024.0);
+	double final_disk_gb = (estimated_voxels * 12) / (1024.0 * 1024.0 * 1024.0);
+
+	std::println(" - Voxels: {}", estimated_voxels);
+	std::println(" - Temp files: {:.3f} GB", temp_disk_gb);
+	std::println(" - Final file: {:.3f} GB", final_disk_gb);
 
 	return 0;
 }
