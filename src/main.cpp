@@ -276,5 +276,29 @@ int main(int argc, char** argv)
 	std::println(" - Temp files: {:.3f} GB", temp_disk_gb);
 	std::println(" - Final file: {:.3f} GB", final_disk_gb);
 
+	if (not_loaded > 0)
+	{
+		std::print("Do you wish to proceed? [y/N]: ");
+
+		std::string answer;
+		while (std::cin >> answer)
+		{
+			if (answer == "y" || answer == "Y")
+			{
+				std::println("Proceeding...");
+				break;
+			}
+			else if (answer == "n" || answer == "N")
+			{
+				std::println("Exiting...");
+				return 1;
+			}
+			else
+			{
+				std::print("Invalid input. Do you wish to proceed? [y/N]: ");
+			}
+		}
+	}
+
 	return 0;
 }
