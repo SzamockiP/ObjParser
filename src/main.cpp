@@ -707,8 +707,14 @@ int main(int argc, char** argv)
 									{
 										auto& tex = texture_cache[tex_name];
 
-										int tex_x = std::clamp(static_cast<int>(final_u * tex.width), 0, tex.width - 1);
-										int tex_y = std::clamp(static_cast<int>((1.0f - final_v) * tex.height), 0, tex.height - 1);
+										float u_wrap = final_u - std::floor(final_u);
+										float v_wrap = final_v - std::floor(final_v);
+
+										int tex_x = static_cast<int>(u_wrap * tex.width);
+										int tex_y = static_cast<int>((1.0f - v_wrap) * tex.height);
+
+										tex_x = std::clamp(tex_x, 0, tex.width - 1);
+										tex_y = std::clamp(tex_y, 0, tex.height - 1);
 
 										int pixel_index = (tex_y * tex.width + tex_x) * 4;
 										color_r = tex.data[pixel_index + 0];
