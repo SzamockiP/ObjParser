@@ -204,7 +204,7 @@ struct AABB
 struct VoxelData
 {
 	std::uint64_t morton;
-	std::uint8_t r, g, b, a;
+	std::uint32_t rgba;
 
 	bool operator<(const VoxelData& other) const
 	{
@@ -718,11 +718,16 @@ int main(int argc, char** argv)
 									}
 								}
 
+								std::uint32_t packed_rgba = (static_cast<std::uint32_t>(color_r) << 24) |
+									(static_cast<std::uint32_t>(color_g) << 16) |
+									(static_cast<std::uint32_t>(color_b) << 8) |
+									(static_cast<std::uint32_t>(color_a));
+
 								uint64_t morton_code = encode_morton(x, y, z);
 
 								voxel_buffer.push_back({
 									morton_code,
-									color_r, color_g, color_b, color_a
+									packed_rgba
 									});
 
 								if (voxel_buffer.size() >= MAX_BUFFER_SIZE)
